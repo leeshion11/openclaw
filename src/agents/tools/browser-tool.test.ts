@@ -33,6 +33,15 @@ const browserActionsMocks = vi.hoisted(() => ({
   browserAct: vi.fn(async () => ({ ok: true })),
   browserArmDialog: vi.fn(async () => ({ ok: true })),
   browserArmFileChooser: vi.fn(async () => ({ ok: true })),
+  browserDownload: vi.fn(async () => ({
+    ok: true,
+    targetId: "t1",
+    download: {
+      path: "/tmp/report.csv",
+      suggestedFilename: "report.csv",
+      url: "https://example.com/report.csv",
+    },
+  })),
   browserConsoleMessages: vi.fn(async () => ({
     ok: true,
     targetId: "t1",
@@ -47,6 +56,15 @@ const browserActionsMocks = vi.hoisted(() => ({
   browserNavigate: vi.fn(async () => ({ ok: true })),
   browserPdfSave: vi.fn(async () => ({ ok: true, path: "/tmp/test.pdf" })),
   browserScreenshotAction: vi.fn(async () => ({ ok: true, path: "/tmp/test.png" })),
+  browserWaitForDownload: vi.fn(async () => ({
+    ok: true,
+    targetId: "t1",
+    download: {
+      path: "/tmp/report.csv",
+      suggestedFilename: "report.csv",
+      url: "https://example.com/report.csv",
+    },
+  })),
 }));
 vi.mock("../../browser/client-actions.js", () => browserActionsMocks);
 
@@ -162,6 +180,7 @@ function resetBrowserToolMocks() {
     browserAct: browserActionsMocks.browserAct as never,
     browserArmDialog: browserActionsMocks.browserArmDialog as never,
     browserArmFileChooser: browserActionsMocks.browserArmFileChooser as never,
+    browserDownload: browserActionsMocks.browserDownload as never,
     browserCloseTab: browserClientMocks.browserCloseTab as never,
     browserFocusTab: browserClientMocks.browserFocusTab as never,
     browserNavigate: browserActionsMocks.browserNavigate as never,
@@ -169,6 +188,7 @@ function resetBrowserToolMocks() {
     browserPdfSave: browserActionsMocks.browserPdfSave as never,
     browserProfiles: browserClientMocks.browserProfiles as never,
     browserScreenshotAction: browserActionsMocks.browserScreenshotAction as never,
+    browserWaitForDownload: browserActionsMocks.browserWaitForDownload as never,
     browserStart: browserClientMocks.browserStart as never,
     browserStatus: browserClientMocks.browserStatus as never,
     browserStop: browserClientMocks.browserStop as never,
@@ -812,5 +832,55 @@ describe("browser tool act stale target recovery", () => {
     ).rejects.toThrow(/Run action=tabs profile="user"/i);
 
     expect(browserActionsMocks.browserAct).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("browser tool download actions", () => {
+  registerBrowserToolAfterEachReset();
+
+  it("downloads a file from a visible ref", async () => {
+    const tool = createBrowserTool();
+    const result = await tool.execute?.("call-1", {
+      action: "download",
+      target: "host",
+      ref: "12",
+      path: "report.csv",
+      targetId: "tab-1",
+      timeoutMs: 45000,
+    });
+
+    expect(browserActionsMocks.browserDownload).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({
+        ref: "12",
+        path: "report.csv",
+        targetId: "tab-1",
+        timeoutMs: 45000,
+        profile: undefined,
+      }),
+    );
+    expect(result?.content?.[0]).toMatchObject({ type: "text", text: "FILE:/tmp/report.csv" });
+  });
+
+  it("waits for the next download when export takes multiple clicks", async () => {
+    const tool = createBrowserTool();
+    const result = await tool.execute?.("call-1", {
+      action: "waitfordownload",
+      target: "host",
+      path: "report.csv",
+      targetId: "tab-1",
+      timeoutMs: 60000,
+    });
+
+    expect(browserActionsMocks.browserWaitForDownload).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({
+        path: "report.csv",
+        targetId: "tab-1",
+        timeoutMs: 60000,
+        profile: undefined,
+      }),
+    );
+    expect(result?.content?.[0]).toMatchObject({ type: "text", text: "FILE:/tmp/report.csv" });
   });
 });

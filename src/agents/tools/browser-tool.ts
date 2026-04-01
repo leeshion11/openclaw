@@ -3,9 +3,11 @@ import {
   browserAct,
   browserArmDialog,
   browserArmFileChooser,
+  browserDownload,
   browserNavigate,
   browserPdfSave,
   browserScreenshotAction,
+  browserWaitForDownload,
 } from "../../browser/client-actions.js";
 import {
   browserCloseTab,
@@ -45,6 +47,7 @@ const browserToolDeps = {
   browserAct,
   browserArmDialog,
   browserArmFileChooser,
+  browserDownload,
   browserCloseTab,
   browserFocusTab,
   browserNavigate,
@@ -52,6 +55,7 @@ const browserToolDeps = {
   browserPdfSave,
   browserProfiles,
   browserScreenshotAction,
+  browserWaitForDownload,
   browserStart,
   browserStatus,
   browserStop,
@@ -69,6 +73,7 @@ export const __testing = {
       browserAct: typeof browserAct;
       browserArmDialog: typeof browserArmDialog;
       browserArmFileChooser: typeof browserArmFileChooser;
+      browserDownload: typeof browserDownload;
       browserCloseTab: typeof browserCloseTab;
       browserFocusTab: typeof browserFocusTab;
       browserNavigate: typeof browserNavigate;
@@ -76,6 +81,7 @@ export const __testing = {
       browserPdfSave: typeof browserPdfSave;
       browserProfiles: typeof browserProfiles;
       browserScreenshotAction: typeof browserScreenshotAction;
+      browserWaitForDownload: typeof browserWaitForDownload;
       browserStart: typeof browserStart;
       browserStatus: typeof browserStatus;
       browserStop: typeof browserStop;
@@ -91,6 +97,7 @@ export const __testing = {
     browserToolDeps.browserArmDialog = overrides?.browserArmDialog ?? browserArmDialog;
     browserToolDeps.browserArmFileChooser =
       overrides?.browserArmFileChooser ?? browserArmFileChooser;
+    browserToolDeps.browserDownload = overrides?.browserDownload ?? browserDownload;
     browserToolDeps.browserCloseTab = overrides?.browserCloseTab ?? browserCloseTab;
     browserToolDeps.browserFocusTab = overrides?.browserFocusTab ?? browserFocusTab;
     browserToolDeps.browserNavigate = overrides?.browserNavigate ?? browserNavigate;
@@ -99,6 +106,8 @@ export const __testing = {
     browserToolDeps.browserProfiles = overrides?.browserProfiles ?? browserProfiles;
     browserToolDeps.browserScreenshotAction =
       overrides?.browserScreenshotAction ?? browserScreenshotAction;
+    browserToolDeps.browserWaitForDownload =
+      overrides?.browserWaitForDownload ?? browserWaitForDownload;
     browserToolDeps.browserStart = overrides?.browserStart ?? browserStart;
     browserToolDeps.browserStatus = overrides?.browserStatus ?? browserStatus;
     browserToolDeps.browserStop = overrides?.browserStop ?? browserStop;
@@ -658,6 +667,52 @@ export function createBrowserTool(opts?: {
             : await browserToolDeps.browserPdfSave(baseUrl, { targetId, profile });
           return {
             content: [{ type: "text" as const, text: `FILE:${result.path}` }],
+            details: result,
+          };
+        }
+        case "download": {
+          const ref = readStringParam(params, "ref", { required: true });
+          const path = readStringParam(params, "path", { required: true });
+          const { targetId, timeoutMs } = readOptionalTargetAndTimeout(params);
+          const result = proxyRequest
+            ? ((await proxyRequest({
+                method: "POST",
+                path: "/download",
+                profile,
+                body: { ref, path, targetId, timeoutMs },
+                timeoutMs,
+              })) as Awaited<ReturnType<typeof browserDownload>>)
+            : await browserToolDeps.browserDownload(baseUrl, {
+                ref,
+                path,
+                targetId,
+                timeoutMs,
+                profile,
+              });
+          return {
+            content: [{ type: "text" as const, text: `FILE:${result.download.path}` }],
+            details: result,
+          };
+        }
+        case "waitfordownload": {
+          const path = readStringParam(params, "path");
+          const { targetId, timeoutMs } = readOptionalTargetAndTimeout(params);
+          const result = proxyRequest
+            ? ((await proxyRequest({
+                method: "POST",
+                path: "/wait/download",
+                profile,
+                body: { path, targetId, timeoutMs },
+                timeoutMs,
+              })) as Awaited<ReturnType<typeof browserWaitForDownload>>)
+            : await browserToolDeps.browserWaitForDownload(baseUrl, {
+                path,
+                targetId,
+                timeoutMs,
+                profile,
+              });
+          return {
+            content: [{ type: "text" as const, text: `FILE:${result.download.path}` }],
             details: result,
           };
         }
