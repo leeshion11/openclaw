@@ -15,11 +15,12 @@ import {
   DEFAULT_CONTEXT_TOKENS,
   normalizeModelCompat,
   normalizeProviderId,
-  OPENAI_CODEX_DEFAULT_MODEL,
   type ProviderPlugin,
-} from "openclaw/plugin-sdk/provider-models";
+} from "openclaw/plugin-sdk/provider-model-shared";
 import { createOpenAIAttributionHeadersWrapper } from "openclaw/plugin-sdk/provider-stream";
 import { fetchCodexUsage } from "openclaw/plugin-sdk/provider-usage";
+import { OPENAI_CODEX_DEFAULT_MODEL } from "./default-models.js";
+import { resolveCodexAuthIdentity } from "./openai-codex-auth-identity.js";
 import { buildOpenAICodexProvider } from "./openai-codex-catalog.js";
 import {
   cloneFirstTemplateModel,
@@ -31,8 +32,14 @@ import {
 const PROVIDER_ID = "openai-codex";
 const OPENAI_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const OPENAI_CODEX_GPT_54_MODEL_ID = "gpt-5.4";
-const OPENAI_CODEX_GPT_54_CONTEXT_TOKENS = 1_050_000;
+const OPENAI_CODEX_GPT_54_CONTEXT_TOKENS = 272_000;
 const OPENAI_CODEX_GPT_54_MAX_TOKENS = 128_000;
+const OPENAI_CODEX_GPT_54_COST = {
+  input: 2.5,
+  output: 15,
+  cacheRead: 0.25,
+  cacheWrite: 0,
+} as const;
 const OPENAI_CODEX_GPT_54_TEMPLATE_MODEL_IDS = ["gpt-5.3-codex", "gpt-5.2-codex"] as const;
 const OPENAI_CODEX_GPT_53_MODEL_ID = "gpt-5.3-codex";
 const OPENAI_CODEX_GPT_53_SPARK_MODEL_ID = "gpt-5.3-codex-spark";
@@ -53,62 +60,6 @@ const OPENAI_CODEX_MODERN_MODEL_IDS = [
   OPENAI_CODEX_GPT_53_MODEL_ID,
   OPENAI_CODEX_GPT_53_SPARK_MODEL_ID,
 ] as const;
-
-type CodexJwtPayload = {
-  iss?: unknown;
-  sub?: unknown;
-  "https://api.openai.com/profile"?: {
-    email?: unknown;
-  };
-  "https://api.openai.com/auth"?: {
-    chatgpt_account_user_id?: unknown;
-    chatgpt_user_id?: unknown;
-    user_id?: unknown;
-  };
-};
-
-function normalizeNonEmptyString(value: unknown): string | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  return value.trim() || undefined;
-}
-
-function decodeCodexJwtPayload(accessToken: string): CodexJwtPayload | null {
-  const parts = accessToken.split(".");
-  if (parts.length !== 3) {
-    return null;
-  }
-
-  try {
-    const decoded = Buffer.from(parts[1], "base64url").toString("utf8");
-    const parsed = JSON.parse(decoded);
-    return parsed && typeof parsed === "object" ? (parsed as CodexJwtPayload) : null;
-  } catch {
-    return null;
-  }
-}
-
-function resolveCodexStableSubject(payload: CodexJwtPayload | null): string | undefined {
-  const auth = payload?.["https://api.openai.com/auth"];
-  const accountUserId = normalizeNonEmptyString(auth?.chatgpt_account_user_id);
-  if (accountUserId) {
-    return accountUserId;
-  }
-
-  const userId =
-    normalizeNonEmptyString(auth?.chatgpt_user_id) ?? normalizeNonEmptyString(auth?.user_id);
-  if (userId) {
-    return userId;
-  }
-
-  const iss = normalizeNonEmptyString(payload?.iss);
-  const sub = normalizeNonEmptyString(payload?.sub);
-  if (iss && sub) {
-    return `${iss}|${sub}`;
-  }
-  return sub;
-}
 
 function isOpenAICodexBaseUrl(baseUrl?: string): boolean {
   const trimmed = baseUrl?.trim();
@@ -150,6 +101,7 @@ function resolveCodexForwardCompatModel(
     patch = {
       contextWindow: OPENAI_CODEX_GPT_54_CONTEXT_TOKENS,
       maxTokens: OPENAI_CODEX_GPT_54_MAX_TOKENS,
+      cost: OPENAI_CODEX_GPT_54_COST,
     };
   } else if (lower === OPENAI_CODEX_GPT_53_SPARK_MODEL_ID) {
     templateIds = [OPENAI_CODEX_GPT_53_MODEL_ID, ...OPENAI_CODEX_TEMPLATE_MODEL_IDS];
@@ -194,19 +146,15 @@ function resolveCodexForwardCompatModel(
 
 async function refreshOpenAICodexOAuthCredential(cred: OAuthCredential) {
   try {
-    const { getOAuthApiKey } = await import("./openai-codex-provider.runtime.js");
-    const refreshed = await getOAuthApiKey("openai-codex", {
-      "openai-codex": cred,
-    });
-    if (!refreshed) {
-      throw new Error("OpenAI Codex OAuth refresh returned no credentials.");
-    }
+    const { refreshOpenAICodexToken } = await import("./openai-codex-provider.runtime.js");
+    const refreshed = await refreshOpenAICodexToken(cred.refresh);
     return {
       ...cred,
-      ...refreshed.newCredentials,
+      ...refreshed,
       type: "oauth" as const,
       provider: PROVIDER_ID,
       email: cred.email,
+      displayName: cred.displayName,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -238,14 +186,10 @@ async function runOpenAICodexOAuth(ctx: ProviderAuthContext) {
     return { profiles: [] };
   }
 
-  const payload = decodeCodexJwtPayload(creds.access);
-  const resolvedEmail =
-    normalizeNonEmptyString(payload?.["https://api.openai.com/profile"]?.email) ??
-    normalizeNonEmptyString(creds.email);
-  const stableSubject = resolveCodexStableSubject(payload);
-  const resolvedEmailOrFallback =
-    resolvedEmail ??
-    (stableSubject ? `id-${Buffer.from(stableSubject).toString("base64url")}` : undefined);
+  const identity = resolveCodexAuthIdentity({
+    accessToken: creds.access,
+    email: typeof creds.email === "string" ? creds.email : undefined,
+  });
 
   return buildOauthProviderAuthResult({
     providerId: PROVIDER_ID,
@@ -253,8 +197,38 @@ async function runOpenAICodexOAuth(ctx: ProviderAuthContext) {
     access: creds.access,
     refresh: creds.refresh,
     expires: creds.expires,
-    email: resolvedEmailOrFallback,
+    email: identity.email,
+    profileName: identity.profileName,
   });
+}
+
+function buildOpenAICodexAuthDoctorHint(ctx: { profileId?: string }) {
+  if (ctx.profileId !== CODEX_CLI_PROFILE_ID) {
+    return undefined;
+  }
+  return "Deprecated profile. Run `openclaw models auth login --provider openai-codex` or `openclaw configure`.";
+}
+
+function buildSyntheticCatalogEntry(
+  template: ReturnType<typeof findCatalogTemplate>,
+  entry: {
+    id: string;
+    reasoning: boolean;
+    input: readonly ("text" | "image")[];
+    contextWindow: number;
+  },
+) {
+  if (!template) {
+    return undefined;
+  }
+  return {
+    ...template,
+    id: entry.id,
+    name: entry.id,
+    reasoning: entry.reasoning,
+    input: [...entry.input],
+    contextWindow: entry.contextWindow,
+  };
 }
 
 export function buildOpenAICodexProviderPlugin(): ProviderPlugin {
@@ -295,6 +269,7 @@ export function buildOpenAICodexProviderPlugin(): ProviderPlugin {
       },
     },
     resolveDynamicModel: (ctx) => resolveCodexForwardCompatModel(ctx),
+    buildAuthDoctorHint: (ctx) => buildOpenAICodexAuthDoctorHint(ctx),
     capabilities: {
       providerFamily: "openai",
     },
@@ -334,20 +309,18 @@ export function buildOpenAICodexProviderPlugin(): ProviderPlugin {
         templateIds: [OPENAI_CODEX_GPT_53_MODEL_ID, ...OPENAI_CODEX_TEMPLATE_MODEL_IDS],
       });
       return [
-        gpt54Template
-          ? {
-              ...gpt54Template,
-              id: OPENAI_CODEX_GPT_54_MODEL_ID,
-              name: OPENAI_CODEX_GPT_54_MODEL_ID,
-            }
-          : undefined,
-        sparkTemplate
-          ? {
-              ...sparkTemplate,
-              id: OPENAI_CODEX_GPT_53_SPARK_MODEL_ID,
-              name: OPENAI_CODEX_GPT_53_SPARK_MODEL_ID,
-            }
-          : undefined,
+        buildSyntheticCatalogEntry(gpt54Template, {
+          id: OPENAI_CODEX_GPT_54_MODEL_ID,
+          reasoning: true,
+          input: ["text", "image"],
+          contextWindow: OPENAI_CODEX_GPT_54_CONTEXT_TOKENS,
+        }),
+        buildSyntheticCatalogEntry(sparkTemplate, {
+          id: OPENAI_CODEX_GPT_53_SPARK_MODEL_ID,
+          reasoning: true,
+          input: ["text"],
+          contextWindow: OPENAI_CODEX_GPT_53_SPARK_CONTEXT_TOKENS,
+        }),
       ].filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
     },
   };
